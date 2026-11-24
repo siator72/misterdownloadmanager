@@ -37,7 +37,11 @@ if (-not $NoBuild) {
   $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
   $env:CARGO_ENCODED_RUSTFLAGS = "--remap-path-prefix=$cargoHome=cargo" + [char]0x1f + "--remap-path-prefix=$root=mdm" + [char]0x1f + "-Ctarget-feature=+crt-static"
   try {
-    & cargo build --release --target $target -p mdm-app -p mdm-nmhost -p mdm-cli -p mdm-mcp
+    # Windows on ARM: the browser-like connection's BoringSSL (btls-sys) builds x86 assembly
+    # and fails its link there; the build goes without the feature (browserlike.rs's doc says
+    # what it costs: the bot check's refusal stands). Everywhere else it is on, as ever.
+    $features = if ($Arch -eq "arm64") { @("--no-default-features") } else { @() }
+    & cargo build --release --target $target -p mdm-app -p mdm-nmhost -p mdm-cli -p mdm-mcp @features
     if ($LASTEXITCODE) { throw "cargo build failed" }
   } finally {
     Remove-Item Env:CARGO_ENCODED_RUSTFLAGS

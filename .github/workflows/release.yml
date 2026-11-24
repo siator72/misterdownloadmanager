@@ -136,8 +136,13 @@ jobs:
       - name: Tests
         # The crash tests' example program (examples/crashy) is not always copied where the
         # test finds it on the Windows runners (its own build folder layout); a release build
-        # needs the binaries, not these crash-report tests, so they sit this run out.
-        run: cargo test --workspace --target ${{ matrix.target }} --exclude mdm-crash
+        # needs the binaries, not these crash-report tests, so they sit this run out. On ARM64
+        # the browser-like connection's BoringSSL (btls-sys) builds x86 assembly and fails its
+        # link (aes-gcm-avx2-x86_64-apple.obj missing); the build goes without it, its
+        # feature off (the bot check's refusal stands, as browserlike.rs's doc says).
+        run: >
+          cargo test --workspace --target ${{ matrix.target }} --exclude mdm-crash
+          ${{ matrix.arch == 'arm64' && '--no-default-features' || '' }}
 
       - name: Inno Setup
         shell: pwsh

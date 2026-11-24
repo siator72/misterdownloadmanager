@@ -150,6 +150,31 @@ impl Planner {
             .collect()
     }
 
+    /// Wind the saved progress back `bytes`: the last-fetched data is thrown away and asked
+    /// for again on the resume (Options → Connection → Resume behind the state's end). A
+    /// segment that hasn't got `bytes` on disk gives back what it has; nothing moves past its
+    /// start. The part file must be shortened to [`Self::downloaded`] plus
+    /// [`Self::reserved_beyond`] to match.
+    pub fn rewind(&mut self, mut bytes: u64) {
+        // From the end backwards, so an early segment only gives up what later ones didn't.
+        for s in self.segs.iter_mut().rev() {
+            if bytes == 0 {
+                break;
+            }
+            let has = s.cursor - s.start;
+            let give = bytes.min(has);
+            s.cursor -= give;
+            s.reserved = s.reserved.min(s.cursor);
+            bytes -= give;
+        }
+    }
+
+    /// Beyond [`Self::downloaded`]: claimed but maybe already on the disk (`[cursor,
+    /// reserved)` of every segment). The part file is at least this long.
+    pub fn reserved_beyond(&self) -> u64 {
+        self.segs.iter().map(|s| s.reserved - s.cursor).sum()
+    }
+
     pub fn size(&self) -> u64 {
         self.size
     }

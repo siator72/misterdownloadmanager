@@ -22,6 +22,8 @@ pub struct Changes {
     pub move_to: Option<PathBuf>,
     /// "Through …" changed (#44): downloaded directly (true) or through the account again.
     pub direct: Option<bool>,
+    /// The Proxy row changed: what Options says, the system's, none, or a saved one.
+    pub proxy: Option<crate::settings::ProxyChoice>,
 }
 
 pub struct Properties {
@@ -39,6 +41,10 @@ pub struct Properties {
     /// The debrid accounts (#44): "Through …" shows while one takes the address.
     route: crate::debrid::Route,
     direct: bool,
+    /// The Proxy row's choice, and the names of the proxies Options has saved (its list's
+    /// tail), read when the window opened.
+    proxy: crate::settings::ProxyChoice,
+    saved: Vec<String>,
     files_requested: bool,
 }
 
@@ -58,12 +64,19 @@ impl Properties {
             error: None,
             route,
             direct: item.direct,
+            proxy: item.proxy,
+            saved: Vec::new(),
             files_requested: false,
         }
     }
 
     pub fn take_files_requested(&mut self) -> bool {
         std::mem::take(&mut self.files_requested)
+    }
+
+    /// The names of the proxies Options has saved (the Proxy list's tail), set by the caller.
+    pub fn set_saved(&mut self, saved: Vec<String>) {
+        self.saved = saved;
     }
 
     /// `item` took a new address while this window was open (the browser's next download of
@@ -105,6 +118,7 @@ impl Properties {
                     address,
                     move_to: self.move_to.take(),
                     direct: (self.direct != item.direct).then_some(self.direct),
+                    proxy: (self.proxy != item.proxy).then_some(self.proxy),
                 })
             }
             Outcome::Closed => Outcome::Closed,
@@ -379,6 +393,33 @@ impl Properties {
             &mut self.password,
             editable,
         );
+        // Its proxy (the Proxy drop list, under the password): what Options says, the
+        // system's, none, or one saved in Options → Proxy / Socks. It changes while the
+        // download isn't running or finished.
+        let proxy_items: Vec<String> = crate::settings::ProxyChoice::ALL
+            .iter()
+            .map(|c| c.label(&self.saved))
+            .chain(self.saved.iter().cloned())
+            .collect();
+        let proxy_shown: Vec<&str> = proxy_items.iter().map(|s| s.as_str()).collect();
+        winui::text_right(
+            ui.painter(),
+            o.x + 110.0,
+            o.y + 390.0,
+            crate::i18n::t("Proxy"),
+            LIGHT_TEXT(),
+        );
+        if let Some(i) = winui::combo_light(
+            ui,
+            r(o, 120.0, 375.0, 189.0, 21.0),
+            &proxy_shown,
+            self.proxy.index(proxy_items.len() - 3),
+            editable,
+            "properties-proxy",
+        ) && let Some(choice) = crate::settings::ProxyChoice::at(i, proxy_items.len() - 3)
+        {
+            self.proxy = choice;
+        }
         // Through a debrid account (#44), beside the login: unticked, downloaded directly. It
         // changes while the download isn't running or finished.
         if let Some(service) = self.route.service(&item.url) {

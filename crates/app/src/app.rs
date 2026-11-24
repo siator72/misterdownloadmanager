@@ -2771,6 +2771,9 @@ impl App {
         );
         self.name_guessed(id, fi.name_guessed());
         self.set_direct(id, fi.direct);
+        if let Some(item) = self.item(id) {
+            item.proxy = fi.proxy;
+        }
         self.number_at_start(id);
         if let Some(item) = self.item(id) {
             item.replace_file = fi.replaces();
@@ -3619,6 +3622,7 @@ impl App {
                         address: Some(url),
                         move_to: None,
                         direct: None,
+                        proxy: None,
                     };
                     self.apply_properties(c);
                 }
@@ -3914,7 +3918,13 @@ impl App {
             crate::torrents::is_torrent_url(u, cmd.name.as_deref(), cmd.mime.as_deref())
         };
         if !cmd.silent && (torrent(&url) || final_url.as_ref().is_some_and(torrent)) {
-            let parts = self.request_parts(&url, None, &cmd, crate::debrid::browser_started(&cmd));
+            let parts = self.request_parts(
+                &url,
+                None,
+                &cmd,
+                crate::debrid::browser_started(&cmd),
+                crate::settings::ProxyChoice::Default,
+            );
             self.show_for_dialog(ctx);
             self.open_torrent_dialog_with(
                 Some(url.to_string()),
@@ -3976,7 +3986,7 @@ impl App {
                 self.start(id, true);
             }
         } else {
-            self.open_file_info(dialogs::NewUrl { url, login: None }, cmd, ctx);
+            self.open_file_info(dialogs::NewUrl::new(url, None), cmd, ctx);
         }
     }
 
@@ -3993,6 +4003,7 @@ impl App {
         login: Option<&(String, String)>,
         context: &ipc::Command,
         direct: bool,
+        proxy: crate::settings::ProxyChoice,
     ) -> RequestParts {
         let site_login = self.settings.site_login(url);
         let url_login = mdm_engine::ftp::is_ftp(url)
@@ -4021,7 +4032,8 @@ impl App {
         let given = context.user_agent.as_deref().or(own);
         let opts = Options {
             max_connections: self.settings.connections_for(url),
-            proxy: self.settings.proxy_for(context),
+            resume_rewind: self.settings.resume_rewind_bytes(),
+            proxy: self.settings.proxy_for_choice(context, proxy),
             dns: self.settings.dns(),
             route: self.route.clone(),
             // Through a debrid account when one takes this host (#44).
@@ -4340,8 +4352,9 @@ impl App {
             self.dirty = true;
             return;
         }
+        let proxy = self.item(id).map(|i| i.proxy).unwrap_or_default();
         let RequestParts { headers, mut opts } =
-            self.request_parts(&url, login.as_ref(), &context, direct);
+            self.request_parts(&url, login.as_ref(), &context, direct, proxy);
         // Download File Info's open answer for it, if it has one (#28); used once.
         let kept = self.kept_answers.remove(&id);
         // The file's own remembered limit, else the Speed Limiter's.
@@ -5428,18 +5441,34 @@ impl App {
         }
         let route = self.debrid_route();
         if let Some(item) = self.items.iter().find(|i| i.id == id) {
-            self.properties
-                .push(crate::properties::Properties::new(item, route));
+            let mut properties = crate::properties::Properties::new(item, route);
+            properties.set_saved(
+                self.settings
+                    .saved_proxies
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .collect(),
+            );
+            self.properties.push(properties);
         }
     }
 
     /// File Properties → OK. Its resume state follows a new address or route beside the window
     /// ([`crate::deleter::Deleter::rewrite`]): its next start waits for it on its own task.
     fn apply_properties(&mut self, c: crate::properties::Changes) {
+        // The Proxy row changed: the next start (a running one's, after it is stopped for it)
+        // goes through the chosen proxy.
+        let restart = c.proxy.is_some()
+            && self
+                .item(c.id)
+                .is_some_and(|i| i.status == Status::Downloading);
         let Some(item) = self.item(c.id) else { return };
         item.description = c.description;
         item.login = c.login;
         item.set_referer(c.referer);
+        if let Some(proxy) = c.proxy {
+            item.proxy = proxy;
+        }
         let rerouted = c.direct.is_some();
         // "Through …" changed (#44): the next start goes the new way. The service's link is
         // dropped from the resume state: directly, it continues from the host's own address;
@@ -5479,6 +5508,12 @@ impl App {
         self.dirty = true;
         if let Some(target) = move_to {
             self.start_move(c.id, target);
+        }
+        // Its proxy changed while it was downloading: it stops and starts again, through the
+        // new one (its place and resume state stay as they are).
+        if restart {
+            self.stop(c.id);
+            self.start(c.id, false);
         }
     }
 
@@ -6482,7 +6517,9 @@ impl App {
         // downloads the video itself.
         let one_file = self.helper_limits(id).0;
         let engine = self.items.iter().find(|i| i.id == id).map(|i| {
-            let mut opts = self.request_parts(&i.url, None, &i.context, true).opts;
+            let mut opts = self
+                .request_parts(&i.url, None, &i.context, true, i.proxy)
+                .opts;
             opts.speed_limit = one_file;
             mdm_tools::streams::Engine {
                 handle: self.rt.clone(),
@@ -6616,7 +6653,9 @@ impl App {
         // under the gallery's own limit, else the Speed Limiter's for one file.
         let one_file = self.helper_limits(id).0;
         let engine = self.items.iter().find(|i| i.id == id).map(|i| {
-            let mut opts = self.request_parts(&i.url, None, &i.context, true).opts;
+            let mut opts = self
+                .request_parts(&i.url, None, &i.context, true, i.proxy)
+                .opts;
             opts.speed_limit = one_file;
             mdm_tools::streams::Engine {
                 handle: self.rt.clone(),
@@ -6929,7 +6968,13 @@ impl App {
         // The files' requests: Options' connections, proxy, DNS and adapter; the service's own
         // unlocking is the torrent job's (not a host's link).
         let mut net = self
-            .request_parts(&url, None, &Default::default(), true)
+            .request_parts(
+                &url,
+                None,
+                &Default::default(),
+                true,
+                crate::settings::ProxyChoice::Default,
+            )
             .opts;
         net.speed_limit = own.or(limit);
         let rt = self.rt.clone();
@@ -8258,6 +8303,90 @@ impl App {
     }
 
     /// Options → OK: keep the new settings and act on what changed.
+    /// Options → Backup → Export: everything (list, settings, queues, and every unfinished
+    /// download's part file and resume state) written to `path` (backup.rs). A file that
+    /// could not be read is named in the list's notice, never silently dropped.
+    fn backup_export(&mut self, path: PathBuf) {
+        let taken = crate::backup::take(
+            self.next_id,
+            &self.items,
+            Some(&self.list.layout()),
+            &self.settings,
+            &self.queues,
+        );
+        let said = match taken {
+            Ok(t) => serde_json::to_vec_pretty(&t.backup)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
+                .map(|()| {
+                    let mut line = format!(
+                        // i18n: Options → Backup → Export's result: where it went and what it holds
+                        "Backup saved to {}: {}",
+                        path.display(),
+                        t.backup.summary()
+                    );
+                    for skip in &t.skipped {
+                        line.push_str(&format!("\nSkipped: {skip}"));
+                    }
+                    line
+                })
+                .unwrap_or_else(|e| {
+                    // i18n: Options → Backup → Export failed
+                    format!("Could not save the backup: {e}")
+                }),
+            Err(e) => format!("Could not take the backup: {e}"),
+        };
+        rfd::MessageDialog::new()
+            .set_title("Backup")
+            .set_description(&said)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+
+    /// Options → Backup → Import: the backup's list, settings and queues become the app's
+    /// own, and every unfinished download's files go back beside their destinations. The
+    /// window reloads the list from disk, so it is exactly as the backup had it.
+    fn backup_import(&mut self, path: PathBuf) {
+        let said = match crate::backup::Backup::load(&path) {
+            Ok(backup) => {
+                let summary = backup.summary();
+                match backup.restore() {
+                    Ok((files, skipped)) => {
+                        self.reload_after_restore();
+                        let mut line = format!(
+                            // i18n: Options → Backup → Import's result: what came back
+                            "{summary} — {files} unfinished downloads' files restored. \
+                             Restart MDM to see everything as the backup had it."
+                        );
+                        for skip in &skipped {
+                            line.push_str(&format!("\nSkipped: {skip}"));
+                        }
+                        line
+                    }
+                    Err(e) => format!("Could not restore the backup: {e}"),
+                }
+            }
+            Err(e) => format!("Not an MDM backup: {e}"),
+        };
+        rfd::MessageDialog::new()
+            .set_title("Backup")
+            .set_description(&said)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+
+    /// Read the restored list back (its file was replaced on the disk): the window's items,
+    /// settings and queues are reloaded from it, as at start.
+    fn reload_after_restore(&mut self) {
+        let loaded = crate::store::load();
+        self.next_id = loaded.next_id;
+        self.items = loaded.items;
+        self.queues = loaded.queues;
+        self.apply_options(loaded.settings);
+        self.dirty = true;
+        let _ = self.save_now();
+    }
+
     fn apply_options(&mut self, new: Settings) {
         new.publish_categories();
         // Portable mode writes nothing outside its folder (the option is off there).
@@ -11485,7 +11614,7 @@ impl App {
         ctx: &egui::Context,
     ) {
         let direct = crate::debrid::browser_started(&context);
-        let request = self.request_parts(&new.url, new.login.as_ref(), &context, direct);
+        let request = self.request_parts(&new.url, new.login.as_ref(), &context, direct, new.proxy);
         let mut fi = FileInfo::new(
             new,
             context,
@@ -11495,6 +11624,11 @@ impl App {
             self.settings.category_dirs.clone(),
             &self.rt,
             ctx,
+            self.settings
+                .saved_proxies
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
         );
         fi.remember = self.settings.change_folder_on_last;
         fi.folders = self.settings.folder_history.clone();
@@ -11739,10 +11873,7 @@ impl App {
             Pending::Command(cmd) => self.handle_command(*cmd, ctx),
             Pending::Url(new) => {
                 if self.duplicate_gate(&new.url, || {
-                    Pending::Url(dialogs::NewUrl {
-                        url: new.url.clone(),
-                        login: new.login.clone(),
-                    })
+                    Pending::Url(dialogs::NewUrl::new(new.url.clone(), new.login.clone()))
                 }) {
                     self.open_file_info(new, Default::default(), ctx);
                 }
@@ -12426,7 +12557,13 @@ impl App {
                 user_agent: d.user_agent.clone(),
                 ..Default::default()
             };
-            let parts = self.request_parts(&url, None, &context, false);
+            let parts = self.request_parts(
+                &url,
+                None,
+                &context,
+                false,
+                crate::settings::ProxyChoice::Default,
+            );
             let slot: std::sync::Arc<std::sync::Mutex<Option<_>>> = Default::default();
             let (out, ctx) = (slot.clone(), ctx.clone());
             self.rt.spawn(async move {
@@ -12455,7 +12592,13 @@ impl App {
                 user_agent: d.user_agent.clone(),
                 ..Default::default()
             };
-            let parts = self.request_parts(&url, None, &context, false);
+            let parts = self.request_parts(
+                &url,
+                None,
+                &context,
+                false,
+                crate::settings::ProxyChoice::Default,
+            );
             let slot: std::sync::Arc<std::sync::Mutex<Option<_>>> = Default::default();
             let (out, ctx) = (slot.clone(), ctx.clone());
             self.rt.spawn(async move {
@@ -13024,6 +13167,7 @@ impl App {
                         new.login.as_ref(),
                         &Default::default(),
                         false,
+                        new.proxy,
                     );
                     let remote = crate::torrents::Remote {
                         url: new.url.clone(),
@@ -13050,10 +13194,7 @@ impl App {
                     self.add_url = None;
                     let url = new.url.clone();
                     if self.duplicate_gate(&url, || {
-                        Pending::Url(dialogs::NewUrl {
-                            url: new.url.clone(),
-                            login: new.login.clone(),
-                        })
+                        Pending::Url(dialogs::NewUrl::new(new.url.clone(), new.login.clone()))
                     }) {
                         self.open_file_info(new, Default::default(), ctx);
                     }
@@ -13466,6 +13607,15 @@ impl App {
                 }
                 Outcome::Done(new) => {
                     let new = Settings::merge_changes(&self.settings, &d.from, &new);
+                    // Options → Backup: the list and the queues live here, so the window
+                    // writes or restores the backup once the dialog has closed with OK.
+                    if let Some(path) = d.backup_ask.take() {
+                        if d.was_backup_export {
+                            self.backup_export(path);
+                        } else {
+                            self.backup_import(path);
+                        }
+                    }
                     self.options = None;
                     self.apply_options(new);
                 }
@@ -17184,6 +17334,7 @@ mod start_disk_tests {
             address: Some(new.clone()),
             move_to: None,
             direct: None,
+            proxy: None,
         });
         assert!(at.elapsed() < AT_ONCE, "the window doesn't wait");
         assert_eq!(get(&app, 1).url, new);
@@ -17266,14 +17417,7 @@ mod start_disk_tests {
                 name: Some(name.to_owned()),
                 ..Default::default()
             };
-            app.open_file_info(
-                dialogs::NewUrl {
-                    url: address(name),
-                    login: None,
-                },
-                context,
-                &ctx,
-            );
+            app.open_file_info(dialogs::NewUrl::new(address(name), None), context, &ctx);
         };
         let names: Vec<String> = (1..=FILE_INFOS_MOST + 2)
             .map(|n| format!("file-{n}.zip"))

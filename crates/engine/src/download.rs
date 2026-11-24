@@ -99,6 +99,12 @@ pub struct Options {
     /// Consecutive failures after which a connection gives up (it retires if others are
     /// still working, otherwise the download fails).
     pub max_retries: u32,
+    /// When a download that has data on disk is resumed (after a connection error, a cut-off,
+    /// a crash or a shutdown), its saved segments are wound back this many bytes and the part
+    /// file is shortened to match: what was fetched in the last moments (a proxy's or a
+    /// server's tail that the machine never saw) is fetched again. 0 resumes from where the
+    /// state says.
+    pub resume_rewind: u64,
     /// The first retry is immediate (as IDM, lab S5); then this delay, doubling, capped at 30 s.
     pub retry_delay: Duration,
     /// The download's User-Agent: by default the automatic one (`agent::automatic`, the default
@@ -279,6 +285,7 @@ impl Default for Options {
             connect_timeout: Duration::from_secs(30),
             read_timeout: Duration::from_secs(30),
             max_retries: 5,
+            resume_rewind: 0,
             retry_delay: Duration::from_secs(1),
             user_agent: crate::agent::automatic(),
             automatic_agent: true,
@@ -2960,6 +2967,20 @@ async fn run_resume(
     let mut planner = Planner::resume(saved.size, opts.min_split, &saved.segments)
         .map_err(|_| bad("segments do not cover the file"))?;
     planner.set_preempt_after(PREEMPT_MIN);
+    // Wound back after a cut-off: what the last moments fetched (behind a proxy or a dying
+    // connection) is asked for again and written over, so the part file never keeps bytes the
+    // machine never saw.
+    if opts.resume_rewind > 0 {
+        let had = planner.downloaded();
+        planner.rewind(opts.resume_rewind);
+        let back = had - planner.downloaded();
+        if back > 0 {
+            shared.event(format!(
+                "Rewound {} behind the state's end, to fetch the tail again",
+                disk::human(back)
+            ));
+        }
+    }
     *shared.planner.lock().unwrap() = Some(planner);
     {
         let mut v = shared.view.lock().unwrap();

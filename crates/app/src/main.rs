@@ -2,6 +2,7 @@
 
 mod app;
 mod archtest;
+mod backup;
 mod batch;
 mod categories;
 mod checksum;

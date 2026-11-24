@@ -67,6 +67,9 @@ enum Sub {
     Login(Option<usize>, String, String, String),
     /// Connection → New / Edit exception: (row, server, number).
     Exception(Option<usize>, String, String),
+    /// Proxy / Socks → Saved proxies → New / Edit: (row, the entry being edited).
+    ProxyEdit(Option<usize>, crate::settings::ProxyEntry),
+
     /// General → Download panels → Edit...: (the button over videos on, its size (#1278), the
     /// sites it stays off, what Export / Import said).
     Panels(bool, PanelSize, String, String),
@@ -93,6 +96,8 @@ enum Sub {
 
 /// Options → Remote's page number (the tabs' numbers).
 const REMOTE_PAGE: usize = 11;
+/// Options' Backup page: export and import (Options → Backup).
+const BACKUP_PAGE: usize = 12;
 /// Test browser integration: from a check's line to the path under it (#818).
 const DETAIL_H: f32 = 18.0;
 
@@ -246,6 +251,16 @@ pub struct OptionsDialog {
     hours: String,
     /// The exceptions' and site logins' lists: scroll and selection.
     exc_rows: winui::RowList,
+    /// Proxy / Socks → Saved proxies: the list's selection.
+    saved_rows: winui::RowList,
+    /// Connection → Resume behind the state's end, as typed (KB).
+    resume_kb: String,
+    /// Options → Backup → Export / Import: the file the window should write or restore when
+    /// the dialog is closed with OK (the list and the queues live in the window, not here).
+    pub backup_ask: Option<std::path::PathBuf>,
+    /// Whether `backup_ask` writes a backup (true) or restores one: the two buttons.
+    pub was_backup_export: bool,
+
     login_rows: winui::RowList,
     /// Accounts' list (#44).
     account_rows: winui::RowList,
@@ -384,6 +399,11 @@ impl OptionsDialog {
             page: 0,
             category: 0,
             exc_rows: Default::default(),
+            saved_rows: Default::default(),
+            resume_kb: settings.resume_rewind_kb.to_string(),
+            backup_ask: None,
+            was_backup_export: true,
+
             login_rows: Default::default(),
             account_rows: Default::default(),
             sound_rows: Default::default(),
@@ -420,7 +440,7 @@ impl OptionsDialog {
             ctx,
             "options",
             "Mister Download Manager Configuration",
-            [430.0, 506.0],
+            [430.0, 566.0],
             false,
             LIGHT_BG(),
             |ui, o| {
@@ -443,12 +463,13 @@ impl OptionsDialog {
                     9 => self.regional(ui, o),
                     10 => self.archives(ui, o),
                     REMOTE_PAGE => self.remote_page(ui, o),
+                    BACKUP_PAGE => self.backup_page(ui, o),
                     8 => self.sounds(ui, o),
                     _ => self.regional(ui, o),
                 }
                 let ok = winui::button_light(
                     ui,
-                    r(o, 269.0, 477.0, 73.0, 21.0),
+                    r(o, 269.0, 537.0, 73.0, 21.0),
                     "OK",
                     ButtonKind::Default,
                     false,
@@ -456,7 +477,7 @@ impl OptionsDialog {
                 .clicked();
                 if winui::button_light(
                     ui,
-                    r(o, 350.0, 477.0, 73.0, 21.0),
+                    r(o, 350.0, 537.0, 73.0, 21.0),
                     // i18n: noun: button that opens the help
                     "Help",
                     ButtonKind::Normal,
@@ -1282,7 +1303,7 @@ impl OptionsDialog {
         // #93: the built-in categories by file type as shipped again (beside OK, on this page).
         if winui::button_light(
             ui,
-            r(o, 21.0, 477.0, 232.0, 21.0),
+            r(o, 21.0, 537.0, 232.0, 21.0),
             "Restore the built-in categories",
             ButtonKind::Normal,
             false,
@@ -1776,6 +1797,44 @@ impl OptionsDialog {
         {
             self.sub = Some(Sub::Dns(DnsEdit::from(&self.s)));
         }
+        // Resume behind the state's end: after a cut-off (a connection error, the machine's
+        // power or the internet's), the resumed download's tail is fetched again.
+        let line = winui::SentenceLine {
+            lead: winui::Lead::Right(o.x + 150.0),
+            lead_baseline: o.y + 458.0,
+            boxes: o + vec2(154.0, 444.0),
+            gap: 6.0,
+            baseline: o.y + 458.0,
+        };
+        let lines = winui::sentence(
+            ui,
+            &p,
+            // i18n: Options → Connection: a number box's sentence; the box takes kilobytes
+            crate::i18n::t("On a cut-off, resume downloads from {kb} KB earlier"),
+            &[line],
+            &[("kb", vec2(44.0, 20.0))],
+            |p, x, baseline, s| {
+                winui::label(p, x, baseline, s, true);
+            },
+        );
+        let names = winui::sentence_names(
+            crate::i18n::t("On a cut-off, resume downloads from {kb} KB earlier"),
+            &["kb"],
+        );
+        let kb_box = winui::number_field(
+            ui,
+            lines[0],
+            &mut self.resume_kb,
+            0,
+            1024,
+            true,
+            LIGHT_PAGE(),
+        );
+        winui::name(&kb_box, &names[0]);
+        self.s.resume_rewind_kb = self
+            .resume_kb
+            .parse::<u32>()
+            .unwrap_or(self.s.resume_rewind_kb);
     }
 
     fn proxy(&mut self, ui: &mut Ui, o: Pos2) {
@@ -2032,6 +2091,102 @@ impl OptionsDialog {
             s.ftp_passive = passive;
         }
         self.adapter_row(ui, o);
+        self.saved_proxies_row(ui, o);
+    }
+
+    /// Proxy / Socks → Saved proxies: the list of proxies saved by name (of every kind), the
+    /// download dialogs' Proxy list's tail; New / Edit / Delete keep it.
+    fn saved_proxies_row(&mut self, ui: &mut Ui, o: Pos2) {
+        let p = ui.painter().clone();
+        winui::etched_h(&p, o.x + 21.0, o.y + 466.0, 381.0);
+        // i18n: label before the list of proxies saved by name (Options → Proxy / Socks)
+        text(
+            &p,
+            o.x + 27.0,
+            o.y + 478.0,
+            crate::i18n::t("Saved proxies:"),
+            LIGHT_TEXT(),
+        );
+        let names: Vec<String> = self
+            .s
+            .saved_proxies
+            .iter()
+            .map(|e| format!("{} \u{2014} {}", e.name, e.kind_label()))
+            .collect();
+        let shown: Vec<String> = if names.is_empty() {
+            // i18n: Options → Proxy / Socks → Saved proxies: no proxy is saved ("(none)")
+            vec![crate::i18n::t("(none)").to_string()]
+        } else {
+            names
+        };
+        let mut list = winui::RowList::default();
+        list.name = crate::i18n::t("Saved proxies:");
+        let (_open, delete) = report(
+            ui,
+            o,
+            r(o, 27.0, 492.0, 290.0, 40.0),
+            &[],
+            &shown.iter().map(|n| vec![n.clone()]).collect::<Vec<_>>(),
+            &mut list,
+            false,
+            "opt-saved-proxies",
+        );
+        self.saved_rows = list;
+        let edit_kind = if self.saved_rows.selected.is_some() {
+            ButtonKind::Normal
+        } else {
+            ButtonKind::Disabled
+        };
+        if winui::button_light(
+            ui,
+            r(o, 324.0, 492.0, 30.0, 21.0),
+            // i18n: a button: save a new proxy
+            "New",
+            ButtonKind::Normal,
+            false,
+        )
+        .clicked()
+        {
+            self.sub = Some(Sub::ProxyEdit(
+                None,
+                crate::settings::ProxyEntry {
+                    name: crate::i18n::fmt(
+                        // i18n: Options → Proxy / Socks → Saved proxies → New: a new entry's name; {n} its number in the list, "Proxy 2"
+                        crate::i18n::t("Proxy {n}"),
+                        &[("n", &(self.s.saved_proxies.len() + 1).to_string())],
+                    )
+                    .to_string(),
+                    kind: crate::settings::ProxyKind::Http,
+                    host: String::new(),
+                    port: String::new(),
+                    user: String::new(),
+                    pass: String::new(),
+                    remote_dns: false,
+                    http: true,
+                    https: true,
+                },
+            ));
+        }
+        if winui::button_light(
+            ui,
+            r(o, 358.0, 492.0, 30.0, 21.0),
+            // i18n: a button: change the chosen proxy
+            "Edit",
+            edit_kind,
+            false,
+        )
+        .clicked()
+            && let Some(i) = self.saved_rows.selected
+            && let Some(e) = self.s.saved_proxies.get(i).cloned()
+        {
+            self.sub = Some(Sub::ProxyEdit(Some(i), e));
+        }
+        if delete
+            && let Some(i) = self.saved_rows.selected
+            && i < self.s.saved_proxies.len()
+        {
+            self.s.saved_proxies.remove(i);
+        }
     }
 
     /// Proxy / Socks → Test (#1558): one request through what the page says now (its proxy, the
@@ -3312,6 +3467,77 @@ impl OptionsDialog {
 
     /// Remote (#141, ours): phones and computers on the local network add and control
     /// downloads from a page MDM serves, once paired with a code shown here.
+    fn backup_page(&mut self, ui: &mut Ui, o: Pos2) {
+        let p = ui.painter().clone();
+        // i18n: Options page title: export and import a backup of everything
+        let title = crate::i18n::mark("Backup");
+        let w = winui::text_width_font(&p, winui::tahoma_bold(), title);
+        header(ui, o, Icon::PageProxy, title, true, 406.0 - w, 61.0, 406.0);
+        // i18n: Options → Backup: what a backup holds
+        winui::label(
+            &p,
+            o.x + 27.0,
+            o.y + 104.0,
+            "Everything: the download list, all settings, and every unfinished download \
+             with its part file and resume state — restored as it was on a new Windows.",
+            true,
+        );
+
+        // Export: the backup file is written where the user picks (its default name says
+        // when it was taken).
+        if winui::button_light(
+            ui,
+            r(o, 27.0, 140.0, 90.0, 23.0),
+            // i18n: a button: write the backup file
+            "Export…",
+            ButtonKind::Normal,
+            false,
+        )
+        .clicked()
+        {
+            let name = format!("mdm-backup-{}.json", chrono::Local::now().date_naive());
+            let dir = mdm_ipc::data_dir().unwrap_or_else(std::env::temp_dir);
+            if let Some(pick) = winui::save_dialog(
+                // i18n: Options → Backup → Export: the save dialog's title
+                "Choose where the backup goes",
+                &dir,
+                &name,
+            )
+            .add_filter("MDM backup", &["json"])
+            .save_file()
+            {
+                // The list lives in the window: it does the work when the dialog is closed
+                // with OK (`backup_ask`).
+                self.backup_ask = Some(pick);
+                self.was_backup_export = true;
+            }
+        }
+
+        // Import: the file is read, the list and settings replace what is here, and the
+        // unfinished files go back beside their destinations.
+        if winui::button_light(
+            ui,
+            r(o, 125.0, 140.0, 90.0, 23.0),
+            // i18n: a button: read a backup file and restore it
+            "Import…",
+            ButtonKind::Normal,
+            false,
+        )
+        .clicked()
+        {
+            if let Some(pick) = winui::file_dialog(
+                // i18n: Options → Backup → Import: the open dialog's title
+                "Choose the backup to restore",
+            )
+            .add_filter("MDM backup", &["json"])
+            .pick_file()
+            {
+                self.backup_ask = Some(pick);
+                self.was_backup_export = false;
+            }
+        }
+    }
+
     fn remote_page(&mut self, ui: &mut Ui, o: Pos2) {
         let p = ui.painter().clone();
         // i18n: Options page title: control MDM from a phone or another computer on the local network
@@ -3875,6 +4101,147 @@ impl OptionsDialog {
                             None => self.s.conn_exceptions.push(entry),
                         }
                     }
+                    Outcome::Closed => {}
+                }
+            }
+            Sub::ProxyEdit(row, mut entry) => {
+                let title = if row.is_some() {
+                    crate::i18n::mark("Edit proxy")
+                } else {
+                    crate::i18n::mark("New proxy")
+                };
+                let out = window(
+                    ctx,
+                    "opt-proxy-edit",
+                    title,
+                    [300.0, 205.0],
+                    false,
+                    LIGHT_BG(),
+                    |ui, o| {
+                        let p = ui.painter().clone();
+                        // i18n: label before the proxy's name in the list
+                        winui::text_right(
+                            &p,
+                            o.x + 70.0,
+                            o.y + 26.0,
+                            crate::i18n::t("Name:"),
+                            LIGHT_TEXT(),
+                        );
+                        winui::edit_light(
+                            ui,
+                            r(o, 78.0, 12.0, 210.0, 23.0),
+                            &mut entry.name,
+                            true,
+                            false,
+                        );
+                        // i18n: Options → Proxy / Socks → Manual → Type: what the proxy speaks
+                        let kind = crate::i18n::t("Type:");
+                        winui::text_right(&p, o.x + 70.0, o.y + 57.0, kind, LIGHT_TEXT());
+                        let kinds: Vec<String> = crate::settings::ProxyKind::ALL
+                            .iter()
+                            .map(|k| k.label().to_owned())
+                            .collect();
+                        let kind_shown: Vec<&str> = kinds.iter().map(String::as_str).collect();
+                        if let Some(i) = winui::combo_light(
+                            ui,
+                            r(o, 78.0, 43.0, 120.0, 21.0),
+                            &kind_shown,
+                            crate::settings::ProxyKind::ALL
+                                .iter()
+                                .position(|k| *k == entry.kind)
+                                .unwrap_or(0),
+                            true,
+                            "opt-proxy-edit-kind",
+                        ) {
+                            entry.kind = crate::settings::ProxyKind::ALL[i];
+                        }
+                        // SOCKS5's remote DNS (Options → Proxy / Socks → Manual's).
+                        let socks = entry.kind.is_socks();
+                        winui::checkbox_light(
+                            ui,
+                            o + vec2(78.0, 68.0),
+                            &mut entry.remote_dns,
+                            // i18n: Options → Proxy / Socks → Saved proxies → Edit: resolve site names through a SOCKS5 proxy
+                            "Resolve names through the proxy",
+                            socks,
+                        );
+                        // i18n: label before a server name
+                        winui::text_right(
+                            &p,
+                            o.x + 70.0,
+                            o.y + 109.0,
+                            crate::i18n::t("Address:"),
+                            LIGHT_TEXT(),
+                        );
+                        winui::edit_light(
+                            ui,
+                            r(o, 78.0, 95.0, 145.0, 23.0),
+                            &mut entry.host,
+                            true,
+                            false,
+                        );
+                        // i18n: label before a port number
+                        winui::text_right(
+                            &p,
+                            o.x + 228.0,
+                            o.y + 109.0,
+                            crate::i18n::t("Port:"),
+                            LIGHT_TEXT(),
+                        );
+                        winui::edit_light(
+                            ui,
+                            r(o, 228.0, 95.0, 60.0, 23.0),
+                            &mut entry.port,
+                            true,
+                            false,
+                        );
+                        let http_https = !socks;
+                        winui::checkbox_light(
+                            ui,
+                            o + vec2(78.0, 122.0),
+                            &mut entry.http,
+                            "http",
+                            http_https,
+                        );
+                        winui::checkbox_light(
+                            ui,
+                            o + vec2(130.0, 122.0),
+                            &mut entry.https,
+                            "https",
+                            http_https,
+                        );
+                        // i18n: noun: label before the user name
+                        winui::text_right(
+                            &p,
+                            o.x + 70.0,
+                            o.y + 155.0,
+                            crate::i18n::t("User:"),
+                            LIGHT_TEXT(),
+                        );
+                        winui::edit_light(
+                            ui,
+                            r(o, 78.0, 141.0, 210.0, 23.0),
+                            &mut entry.user,
+                            true,
+                            false,
+                        );
+                        winui::text_right(
+                            &p,
+                            o.x + 70.0,
+                            o.y + 186.0,
+                            crate::i18n::t("Password:"),
+                            LIGHT_TEXT(),
+                        );
+                        password(ui, r(o, 78.0, 172.0, 210.0, 23.0), &mut entry.pass, true);
+                        ok_cancel(ui, o, 136.0, 172.0, !entry.host.trim().is_empty())
+                    },
+                );
+                match out {
+                    Outcome::Open => self.sub = Some(Sub::ProxyEdit(row, entry)),
+                    Outcome::Done(()) => match row {
+                        Some(i) => self.s.saved_proxies[i] = entry,
+                        None => self.s.saved_proxies.push(entry),
+                    },
                     Outcome::Closed => {}
                 }
             }
@@ -5218,7 +5585,7 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
     // IDM's Dial Up / VPN tab is gone (D-021: no modem support; it did nothing); ours, Regional
     // (how dates and times are written), Accounts (#44, debrid services) and Archives (#37) share
     // the row, sized by their labels.
-    const P: [(usize, &str, f32, f32, f32); 6] = [
+    const P: [(usize, &str, f32, f32, f32); 7] = [
         // i18n: tab title
         (5, crate::i18n::mark("Proxy / Socks"), 8.0, 104.0, 20.0),
         // i18n: tab title: user names and passwords for sites
@@ -5231,23 +5598,35 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
         (9, crate::i18n::mark("Regional"), 336.0, 380.0, 350.0),
         // i18n: tab title: extracting downloaded archives, and Link grabber
         (10, crate::i18n::mark("Archives"), 380.0, 419.0, 390.0),
+        // i18n: tab title: export and import a backup of everything (list, settings,
+        // unfinished downloads)
+        (
+            BACKUP_PAGE,
+            crate::i18n::mark("Backup"),
+            380.0,
+            419.0,
+            390.0,
+        ),
     ];
     let p = ui.painter().clone();
     let border = winui::HEADER_LINE();
     let (g, pr) = (tab_row(&p, &G, false), tab_row(&p, &P, false));
-    let first_row = page < 5 || page == REMOTE_PAGE;
-    let (front, back): (&[_], &[_]) = if first_row { (&g, &pr) } else { (&pr, &g) };
+    // Each row keeps its own place: the first always above, the second always below — choosing
+    // a tab must never swap the rows' positions, only the chosen one steps forward onto the
+    // page frame.
+    let rows: [&[(usize, &str, f32, f32, f32)]; 2] = [&g, &pr];
     let mut clicked = None;
     let mut tab = |ui: &mut Ui,
-                   (i, label, x0, x1, lx): (usize, &str, f32, f32, f32),
-                   top: f32,
-                   base: f32,
+                   (i, label, x0, x1, _lx): (usize, &str, f32, f32, f32),
+                   row_at: usize,
                    sel: bool| {
+        let top = if row_at == 0 { 9.0 } else { 27.0 };
         let (x0, x1) = if sel {
             (x0 - if x0 <= 8.0 { 2.0 } else { 1.0 }, x1 + 2.0)
         } else {
             (x0, x1)
         };
+        // A chosen tab hangs on the page frame; an unchosen one ends at its row's bottom.
         let bottom = if sel { 45.0 } else { top + 17.0 };
         // From the leading edge: the first tab at the right in RTL.
         let rc = winui::rect(Rect::from_min_max(
@@ -5329,13 +5708,27 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
             o.x + x1,
             o.y + bottom,
             border,
-        );
-        // A translated row too wide for the strip has narrower tabs (`tab_row`): their labels are
-        // cut with "..." and shown whole on hover.
+        ); // A translated row too wide for the strip has narrower tabs (`tab_row`): their labels are
+        // cut with "..." and shown whole on hover. The chosen tab's words stand bold, the
+        // clearest cue this theme has (the theme's own bold face, no new colour).
         let full = crate::i18n::t(label);
         let shown = winui::ellipsize(&p, &winui::tahoma(), full, x1 - x0 - 6.0);
+        let base = if row_at == 0 { 22.0 } else { 40.0 };
         if shown == full {
-            text(&p, o.x + lx, o.y + base, full, LIGHT_TEXT());
+            let w = winui::text_width(&p, full);
+            let lx = x0 + ((x1 - x0 - w) / 2.0).floor();
+            if sel {
+                winui::text_font(
+                    &p,
+                    winui::tahoma_bold(),
+                    o.x + lx,
+                    o.y + base,
+                    full,
+                    LIGHT_TEXT(),
+                );
+            } else {
+                text(&p, o.x + lx, o.y + base, full, LIGHT_TEXT());
+            }
         } else {
             let w = winui::text_width(&p, &shown);
             let lx = x0 + ((x1 - x0 - w) / 2.0).floor();
@@ -5344,11 +5737,12 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
         }
         winui::show_focus(ui, &resp, rc.shrink(2.0));
     };
-    for t in back {
-        tab(ui, *t, 9.0, 22.0, false);
-    }
-    for t in front.iter().filter(|t| t.0 != page) {
-        tab(ui, *t, 27.0, 40.0, false);
+    // The rows in their fixed places, back row first; the chosen tab comes again over the
+    // page frame below, so it hangs on it.
+    for (row_at, row) in rows.iter().enumerate() {
+        for t in row.iter().filter(|t| t.0 != page) {
+            tab(ui, *t, row_at, false);
+        }
     }
     // Page frame (x 6..421, y 45..468) with its shadow, then the selected tab over its top.
     fill(
@@ -5380,8 +5774,12 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
         shadow,
     );
     fill(&p, o.x + 6.0, o.y + 469.0, o.x + 423.0, o.y + 469.0, shadow);
-    if let Some(t) = front.iter().find(|t| t.0 == page) {
-        tab(ui, *t, 25.0, 38.0, true);
+    // The chosen tab over the page frame, in its own row's place (it only reaches down onto
+    // the frame's top edge).
+    for (row_at, row) in rows.iter().enumerate() {
+        if let Some(t) = row.iter().find(|t| t.0 == page) {
+            tab(ui, *t, row_at, true);
+        }
     }
     clicked
 }
@@ -5828,7 +6226,7 @@ mod tests {
     /// One frame of `draw` at the origin, with `events` as its input.
     fn frame(ctx: &egui::Context, events: Vec<egui::Event>, draw: impl FnMut(&mut Ui)) {
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(430.0, 506.0))),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(430.0, 566.0))),
             events,
             ..Default::default()
         };

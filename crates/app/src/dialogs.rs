@@ -937,6 +937,18 @@ pub struct AddUrl {
 pub struct NewUrl {
     pub url: Url,
     pub login: Option<(String, String)>,
+    /// The proxy chosen for it in its dialog (Options' when left: `ProxyChoice::Default`).
+    pub proxy: crate::settings::ProxyChoice,
+}
+
+impl NewUrl {
+    pub fn new(url: Url, login: Option<(String, String)>) -> Self {
+        Self {
+            url,
+            login,
+            proxy: Default::default(),
+        }
+    }
 }
 
 impl AddUrl {
@@ -1164,10 +1176,7 @@ impl AddUrl {
                 if ok || (enter && !list_was_open) {
                     match crate::model::parse_address(&self.address) {
                         Ok(url) if mdm_engine::supported(&url) || url.scheme() == "magnet" => {
-                            return Outcome::Done(NewUrl {
-                                url,
-                                login: self.typed_login(),
-                            });
+                            return Outcome::Done(NewUrl::new(url, self.typed_login()));
                         }
                         _ => self.error = Some(crate::i18n::t("Invalid address").into()),
                     }
@@ -1406,6 +1415,12 @@ pub struct FileInfo {
     /// "Download through …" unticked: downloaded directly instead (`Item::direct`). Unticked
     /// from the start when the browser had already started the download.
     pub direct: bool,
+    /// The proxy chosen for it (the Proxy drop list): what Options says, the system's, none,
+    /// or one saved in Options → Proxy / Socks (`Item::proxy`).
+    pub proxy: crate::settings::ProxyChoice,
+    /// The names of the proxies Options had saved when the dialog opened (the Proxy list's
+    /// tail): looked at once, not kept up while it is open.
+    saved: Vec<String>,
     /// Whether Save As names a folder, looked at off the window's thread: it is asked every
     /// frame, and a folder on a network share that doesn't answer would freeze the window.
     dest_dir: crate::launch::Asked<PathBuf, bool>,
@@ -1443,6 +1458,7 @@ impl FileInfo {
         dirs: Vec<(String, String)>,
         rt: &tokio::runtime::Handle,
         ctx: &egui::Context,
+        saved: Vec<String>,
     ) -> Self {
         let direct = crate::debrid::browser_started(&context);
         let through = route.through(&new.url);
@@ -1511,6 +1527,8 @@ impl FileInfo {
             route,
             through,
             direct,
+            proxy: Default::default(),
+            saved,
             replace: None,
             picked_replaces: Default::default(),
             nth: Nth::FIRST,
@@ -1800,8 +1818,11 @@ impl FileInfo {
         self.place.follow(&mut self.save_as);
         self.follow_route(ctx);
         // The "Download through" line (#44) takes a row of its own while an account takes the
-        // address: the window grows by it.
+        // address: the window grows by it. The Proxy row takes one always.
         let dy = if self.through.is_some() { 26.0 } else { 0.0 };
+        // The Proxy row (always there) pushes the rows below it down by one, like the
+        // "Download through" one does.
+        let dy = dy + 26.0;
         // Preview has 92 px for its label in this language (#192), from 8 px after the group box
         // (it ends at 462) to the window's edge (562): where it needs more, the window grows by it
         // and the right column (icon, size, Preview) widens, its centre moving by half of it.
@@ -2003,6 +2024,36 @@ impl FileInfo {
                     false,
                 );
 
+                // Its proxy (its own choice, kept with the download): what Options says, the
+                // system's, none, or one saved in Options → Proxy / Socks.
+                winui::text_right(
+                    &p,
+                    o.x + 88.0,
+                    o.y + 184.0 + dy,
+                    crate::i18n::t("Proxy"),
+                    winui::TEXT(),
+                );
+                let saved = &self.saved;
+                let items: Vec<String> = crate::settings::ProxyChoice::ALL
+                    .iter()
+                    .map(|c| c.label(saved))
+                    .chain(saved.iter().cloned())
+                    .collect();
+                let shown: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+                let was = self.proxy.index(items.len() - 3);
+                if let Some(i) = winui::combo_light(
+                    ui,
+                    r(o, 96.0, 180.0 + dy, 200.0, 21.0),
+                    &shown,
+                    was,
+                    true,
+                    &own("file-info-proxy"),
+                ) && let Some(choice) = crate::settings::ProxyChoice::at(i, items.len() - 3)
+                    && choice != self.proxy
+                {
+                    self.proxy = choice;
+                }
+
                 // Through a debrid account (#44): ticked, the service unlocks the link; unticked,
                 // the address is downloaded directly. Either way it is looked up again.
                 if let Some(through) = &self.through {
@@ -2014,7 +2065,7 @@ impl FileInfo {
                     );
                     winui::checkbox_until(
                         ui,
-                        o + vec2(96.0, 186.0),
+                        o + vec2(96.0, 186.0 + dy),
                         &mut on,
                         &caption,
                         true,
@@ -5581,10 +5632,10 @@ mod tests {
             .build()
             .unwrap();
         let fi = FileInfo::new(
-            NewUrl {
-                url: Url::parse(&format!("http://127.0.0.1:9/{name}")).unwrap(),
-                login: None,
-            },
+            NewUrl::new(
+                Url::parse(&format!("http://127.0.0.1:9/{name}")).unwrap(),
+                None,
+            ),
             mdm_ipc::Command {
                 name: Some(name.to_owned()),
                 ..Default::default()
@@ -5598,6 +5649,7 @@ mod tests {
             Vec::new(),
             rt.handle(),
             &egui::Context::default(),
+            Vec::new(),
         );
         (fi, rt)
     }

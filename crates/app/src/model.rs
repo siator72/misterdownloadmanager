@@ -523,6 +523,14 @@ pub struct Item {
     /// the file). Kept, so a download goes the same way after a restart.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub direct: bool,
+    /// The proxy the user chose for it in a download dialog (Download File Info, File
+    /// Properties): a saved one, the system's, none, or what Options → Proxy / Socks says.
+    /// Kept, so a download goes through the same proxy after a restart.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::settings::ProxyChoice::is_default"
+    )]
+    pub proxy: crate::settings::ProxyChoice,
     /// A torrent through a debrid account (#44): its `url` is the magnet link, `dest` its folder
     /// (or its one file, once known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1278,6 +1286,7 @@ impl Item {
         Item {
             id,
             url,
+            proxy: Default::default(),
             file_name: dest
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())

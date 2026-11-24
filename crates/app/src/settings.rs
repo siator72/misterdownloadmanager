@@ -14,6 +14,66 @@ pub enum WindowSystemPick {
     Wayland,
 }
 
+/// Which proxy a download goes through, as the download dialogs let the user choose it
+/// (Options → Proxy / Socks keeps the rest). Kept with the download (`Item::proxy`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProxyChoice {
+    /// What Options → Proxy / Socks says (a download from the browser goes its own way when
+    /// "Use proxy/socks from a browser's request" is on).
+    #[default]
+    Default,
+    /// The system's proxy settings (with their automatic configuration script, when one is on).
+    System,
+    /// No proxy/socks: direct connections.
+    Direct,
+    /// A proxy saved in Options → Proxy / Socks → Saved proxies (its row's number).
+    Saved(usize),
+}
+
+impl ProxyChoice {
+    /// In the download dialogs' list's order.
+    pub const ALL: [Self; 3] = [Self::Default, Self::System, Self::Direct];
+
+    /// Whether it says "what Options says" (the default): a download's own field then stays
+    /// out of its file.
+    pub fn is_default(choice: &Self) -> bool {
+        *choice == Self::Default
+    }
+
+    /// The list entry `index` names, `saved` the names of the proxies Options has saved: the
+    /// choice it stands for, None beyond the list's end (an entry that was deleted).
+    pub fn at(index: usize, saved: usize) -> Option<Self> {
+        Some(match index {
+            0 | 1 | 2 => Self::ALL[index],
+            i if i < 3 + saved => Self::Saved(i - 3),
+            _ => return None,
+        })
+    }
+
+    /// Its position in the dialogs' list, `saved` the names of the proxies Options has saved.
+    pub fn index(self, saved: usize) -> usize {
+        match self {
+            Self::Saved(i) if i < saved => 3 + i,
+            _ => Self::ALL.iter().position(|c| *c == self).unwrap_or(0),
+        }
+    }
+
+    /// What the list calls it, `saved` the names of the proxies Options has saved.
+    pub fn label(self, saved: &[String]) -> String {
+        match self {
+            Self::Default => crate::i18n::mark("Default (Options' proxy)").to_owned(),
+            // i18n: a choice in the download dialogs' Proxy list: the system's own proxy settings
+            Self::System => crate::i18n::mark("System proxy").to_owned(),
+            // i18n: a choice in the download dialogs' Proxy list: no proxy at all
+            Self::Direct => crate::i18n::mark("Direct (no proxy)").to_owned(),
+            Self::Saved(i) => saved
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| crate::i18n::mark("Default (Options' proxy)").to_owned()),
+        }
+    }
+}
+
 /// Options → Proxy / Socks → Manual → Type (#1558): what the proxy speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -83,6 +143,57 @@ impl ProxyKind {
             "socks4a" => (ProxyKind::Socks4, true),
             "socks4" => (ProxyKind::Socks4, false),
             _ => return None,
+        })
+    }
+}
+
+/// A proxy saved by name (Options → Proxy / Socks → Saved proxies), of any kind, to choose per
+/// download in the download dialogs (`ProxyChoice::Saved`). Its password is kept in the
+/// keychain (`sealed`), like the others'.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyEntry {
+    pub name: String,
+    pub kind: ProxyKind,
+    /// The address without a scheme (`host` or `host:port`), like Manual's.
+    pub host: String,
+    /// The port as typed; the address goes on without one when it is empty.
+    #[serde(default)]
+    pub port: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(with = "sealed", default)]
+    pub pass: String,
+    /// SOCKS5: the proxy looks the site's name up (socks5h), so this computer's DNS never
+    /// sees it.
+    #[serde(default)]
+    pub remote_dns: bool,
+    /// An HTTP proxy's web-addresses boxes; a SOCKS proxy carries every connection.
+    #[serde(default = "yes")]
+    pub http: bool,
+    #[serde(default = "yes")]
+    pub https: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl ProxyEntry {
+    /// The list's name for its kind, "HTTP", "SOCKS5".
+    pub fn kind_label(&self) -> String {
+        self.kind.label().to_owned()
+    }
+
+    /// Its address with its scheme (and the port when there is one), as the engine takes it:
+    /// `socks5h://127.0.0.1:1080`. None when no address is typed.
+    pub fn url(&self) -> Option<String> {
+        let host = self.host.trim().trim_end_matches('/');
+        (!host.is_empty()).then(|| {
+            let at = match self.port.trim() {
+                "" => host.to_owned(),
+                port => format!("{host}:{port}"),
+            };
+            format!("{}://{at}", self.kind.scheme(self.remote_dns))
         })
     }
 }
@@ -391,6 +502,11 @@ pub struct Settings {
     pub user_agent: String,
     /// Connection: per-server connection limits (server, number).
     pub conn_exceptions: Vec<(String, u32)>,
+    /// Connection → Resume behind the state's end: after a cut-off (a connection error, the
+    /// machine's power or the internet's), a resumed download's state is wound back this many
+    /// kilobytes and the tail fetched again. 0 (the default) resumes from where the state
+    /// says.
+    pub resume_rewind_kb: u32,
     /// Proxy / Socks: 0 none, 1 system, 2 automatic script, 3 manual.
     pub proxy_from_browser: bool,
     pub proxy_mode: u8,
@@ -411,6 +527,10 @@ pub struct Settings {
     /// Manual → Type (#1558). An address typed with its scheme (`socks5://host`, before Type
     /// existed) says it instead ([`Settings::manual_proxy`]).
     pub proxy_kind: ProxyKind,
+    /// Proxy / Socks → Saved proxies: proxies of every kind saved by name, to choose per
+    /// download in the download dialogs (`ProxyChoice::Saved`).
+    #[serde(default)]
+    pub saved_proxies: Vec<ProxyEntry>,
     /// Manual → "Look up site names through the proxy" (SOCKS: socks5h, socks4a), on by
     /// default: this computer's DNS never sees the sites' names.
     pub proxy_remote_dns: bool,
@@ -673,6 +793,7 @@ impl Default for Settings {
             duplicate_action: 0,
             user_agent: String::new(),
             conn_exceptions: Vec::new(),
+            resume_rewind_kb: 0,
             proxy_from_browser: true,
             proxy_mode: 0,
             proxy_script: String::new(),
@@ -685,6 +806,7 @@ impl Default for Settings {
             proxy_https: false,
             proxy_ftp: false,
             proxy_kind: ProxyKind::Http,
+            saved_proxies: Vec::new(),
             proxy_remote_dns: true,
             dns_mode: 0,
             dns_provider: "cloudflare".into(),
@@ -951,6 +1073,11 @@ impl Settings {
         crate::model::category_folder(cat, downloads, &self.category_dirs)
     }
 
+    /// Its rewind, in bytes (`resume_rewind_kb`).
+    pub fn resume_rewind_bytes(&self) -> u64 {
+        u64::from(self.resume_rewind_kb) * 1024
+    }
+
     /// Manual proxy/socks configuration as it is set (#1558): its type, whether names are looked
     /// up through it, and its address without a scheme (`host` or `host:port`). An address
     /// typed with a proxy's scheme (`socks5://host`, as the docs said before Type) says the type
@@ -1087,6 +1214,40 @@ impl Settings {
             }
         }
         self.proxy()
+    }
+
+    /// The proxy for a download whose user chose `choice` in a download dialog: a saved proxy
+    /// (`ProxyChoice::Saved`), the system's, none, or what Options → Proxy / Socks says
+    /// ([`Self::proxy_for`], also the browser's own when "Use proxy/socks from a browser's
+    /// request" is on). A choice whose entry is gone falls back to the default.
+    pub fn proxy_for_choice(
+        &self,
+        context: &mdm_ipc::Command,
+        choice: ProxyChoice,
+    ) -> mdm_engine::Proxy {
+        use mdm_engine::Proxy;
+        if let ProxyChoice::Saved(i) = choice
+            && let Some(entry) = self.saved_proxies.get(i)
+            && let Some(url) = entry.url()
+        {
+            let kind = entry.kind;
+            return Proxy::Manual {
+                url,
+                login: (kind.has_login() && !entry.user.is_empty())
+                    .then(|| (entry.user.clone(), entry.pass.clone())),
+                // A SOCKS proxy carries every connection: the http / https boxes are an HTTP
+                // proxy's (#1558).
+                http: kind.is_socks() || entry.http,
+                https: kind.is_socks() || entry.https,
+            };
+        }
+        match choice {
+            ProxyChoice::Saved(_) => self.proxy_for(context),
+            ProxyChoice::System => crate::pacfetch::system_script()
+                .map_or(Proxy::System, |script| Proxy::Pac { script }),
+            ProxyChoice::Direct => Proxy::None,
+            ProxyChoice::Default => self.proxy_for(context),
+        }
     }
 
     /// Why a download from the browser can't start (#42): its proxy asks for a login that the

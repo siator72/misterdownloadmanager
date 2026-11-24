@@ -1319,6 +1319,9 @@ pub struct App {
     next_id: u64,
     /// The list's selection (several downloads, Ctrl / Shift).
     selection: crate::selection::Selection,
+    /// A backup running (export or restore): the progress window, made when its file was
+    /// picked. When it closes the window goes away; after a restore the list reloads once.
+    backup_progress: Option<crate::backupdlg::Dialog>,
     view: View,
     show_categories: bool,
     /// The node the list was last drawn for (a new one starts at the top).
@@ -2187,6 +2190,7 @@ impl App {
             items,
             next_id,
             selection: Default::default(),
+            backup_progress: None,
             view,
             show_categories,
             all_open,
@@ -8302,77 +8306,37 @@ impl App {
         Ok(answer)
     }
 
-    /// Options → OK: keep the new settings and act on what changed.
-    /// Options → Backup → Export: everything (list, settings, queues, and every unfinished
-    /// download's part file and resume state) written to `path` (backup.rs). A file that
-    /// could not be read is named in the list's notice, never silently dropped.
-    fn backup_export(&mut self, path: PathBuf) {
-        let taken = crate::backup::take(
+    /// Options → Backup → Export: what the Backup page's check boxes cover (the list,
+    /// the settings, every unfinished download's part file and resume state) written to
+    /// `path`, on a worker thread (the progress window watches `self.options.backup_job`).
+    #[allow(dead_code)] // kept beside take_job's other caller in Outcome::Done
+    fn backup_export(&mut self, path: PathBuf, what: crate::backup::What) {
+        let snapshot = crate::backup::snapshot(
             self.next_id,
             &self.items,
             Some(&self.list.layout()),
             &self.settings,
             &self.queues,
+            what,
         );
-        let said = match taken {
-            Ok(t) => serde_json::to_vec_pretty(&t.backup)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
-                .map(|()| {
-                    let mut line = format!(
-                        // i18n: Options → Backup → Export's result: where it went and what it holds
-                        "Backup saved to {}: {}",
-                        path.display(),
-                        t.backup.summary()
-                    );
-                    for skip in &t.skipped {
-                        line.push_str(&format!("\nSkipped: {skip}"));
-                    }
-                    line
+        let dests: Vec<PathBuf> = if what.files {
+            self.items
+                .iter()
+                .filter(|i| {
+                    !matches!(
+                        i.status,
+                        crate::model::Status::Complete | crate::model::Status::Error
+                    )
                 })
-                .unwrap_or_else(|e| {
-                    // i18n: Options → Backup → Export failed
-                    format!("Could not save the backup: {e}")
-                }),
-            Err(e) => format!("Could not take the backup: {e}"),
+                .map(|i| i.dest.clone())
+                .collect()
+        } else {
+            Vec::new()
         };
-        rfd::MessageDialog::new()
-            .set_title("Backup")
-            .set_description(&said)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
-    }
-
-    /// Options → Backup → Import: the backup's list, settings and queues become the app's
-    /// own, and every unfinished download's files go back beside their destinations. The
-    /// window reloads the list from disk, so it is exactly as the backup had it.
-    fn backup_import(&mut self, path: PathBuf) {
-        let said = match crate::backup::Backup::load(&path) {
-            Ok(backup) => {
-                let summary = backup.summary();
-                match backup.restore() {
-                    Ok((files, skipped)) => {
-                        self.reload_after_restore();
-                        let mut line = format!(
-                            // i18n: Options → Backup → Import's result: what came back
-                            "{summary} — {files} unfinished downloads' files restored. \
-                             Restart MDM to see everything as the backup had it."
-                        );
-                        for skip in &skipped {
-                            line.push_str(&format!("\nSkipped: {skip}"));
-                        }
-                        line
-                    }
-                    Err(e) => format!("Could not restore the backup: {e}"),
-                }
-            }
-            Err(e) => format!("Not an MDM backup: {e}"),
-        };
-        rfd::MessageDialog::new()
-            .set_title("Backup")
-            .set_description(&said)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
+        let job = crate::backup::take_job(snapshot, dests, path);
+        if let Some(d) = self.options.as_mut() {
+            d.backup_job = Some(job);
+        }
     }
 
     /// Read the restored list back (its file was replaced on the disk): the window's items,
@@ -11630,6 +11594,7 @@ impl App {
                 .map(|e| e.name.clone())
                 .collect(),
         );
+        fi.later_default = self.settings.later_by_default;
         fi.remember = self.settings.change_folder_on_last;
         fi.folders = self.settings.folder_history.clone();
         fi.nth = dialogs::Nth::free(self.file_infos.iter().map(|f| f.nth));
@@ -12970,6 +12935,17 @@ impl App {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.help_dialogs(ctx);
+        // Options → Backup's progress window: the job on its worker thread reports its
+        // steps here; after a restore the list is read back from the disk once.
+        if let Some(d) = &mut self.backup_progress {
+            let (open, reload) = d.show(ctx);
+            if reload {
+                self.reload_after_restore();
+            }
+            if !open {
+                self.backup_progress = None;
+            }
+        }
         // The next question in turn; one about a download that has left the list meanwhile is
         // checked afresh instead (it may ask again, about another).
         while self.duplicate.is_none()
@@ -13609,15 +13585,48 @@ impl App {
                     let new = Settings::merge_changes(&self.settings, &d.from, &new);
                     // Options → Backup: the list and the queues live here, so the window
                     // writes or restores the backup once the dialog has closed with OK.
+                    let mut job = d.backup_job.take();
+                    let restoring = !d.was_backup_export;
                     if let Some(path) = d.backup_ask.take() {
-                        if d.was_backup_export {
-                            self.backup_export(path);
+                        let what = d.backup_what;
+                        job = Some(if restoring {
+                            crate::backup::restore_job(path, what)
                         } else {
-                            self.backup_import(path);
-                        }
+                            // The list and the queues live here: the snapshot is made in
+                            // this thread (a running download's live does not clone).
+                            let snapshot = crate::backup::snapshot(
+                                self.next_id,
+                                &self.items,
+                                Some(&self.list.layout()),
+                                &self.settings,
+                                &self.queues,
+                                what,
+                            );
+                            let dests: Vec<PathBuf> = if what.files {
+                                self.items
+                                    .iter()
+                                    .filter(|i| {
+                                        !matches!(
+                                            i.status,
+                                            crate::model::Status::Complete
+                                                | crate::model::Status::Error
+                                        )
+                                    })
+                                    .map(|i| i.dest.clone())
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            crate::backup::take_job(snapshot, dests, path)
+                        });
                     }
                     self.options = None;
                     self.apply_options(new);
+                    // The progress window outlives the dialog: it watches the job to its end.
+                    if let Some(job) = job {
+                        self.backup_progress =
+                            Some(crate::backupdlg::Dialog::new(job).with_restore(restoring));
+                    }
                 }
             }
         }

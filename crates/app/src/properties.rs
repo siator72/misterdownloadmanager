@@ -393,9 +393,10 @@ impl Properties {
             &mut self.password,
             editable,
         );
-        // Its proxy (the Proxy drop list, under the password): what Options says, the
-        // system's, none, or one saved in Options → Proxy / Socks. It changes while the
-        // download isn't running or finished.
+        // Its proxy (the Proxy drop list, one row under the password, the same 15 px label
+        // gap as Login's and Password's): what Options says, the system's, none, or one
+        // saved in Options → Proxy / Socks. It changes while the download isn't running or
+        // finished.
         let proxy_items: Vec<String> = crate::settings::ProxyChoice::ALL
             .iter()
             .map(|c| c.label(&self.saved))
@@ -405,13 +406,13 @@ impl Properties {
         winui::text_right(
             ui.painter(),
             o.x + 110.0,
-            o.y + 390.0,
+            o.y + 393.0,
             crate::i18n::t("Proxy"),
             LIGHT_TEXT(),
         );
         if let Some(i) = winui::combo_light(
             ui,
-            r(o, 120.0, 375.0, 189.0, 21.0),
+            r(o, 120.0, 378.0, 189.0, 21.0),
             &proxy_shown,
             self.proxy.index(proxy_items.len() - 3),
             editable,

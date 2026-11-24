@@ -507,6 +507,10 @@ pub struct Settings {
     /// kilobytes and the tail fetched again. 0 (the default) resumes from where the state
     /// says.
     pub resume_rewind_kb: u32,
+    /// Connection → Download Later by default: a download from the Download File Info
+    /// window waits for the user's Start (Enter gives Download Later, not Start Download).
+    #[serde(default)]
+    pub later_by_default: bool,
     /// Proxy / Socks: 0 none, 1 system, 2 automatic script, 3 manual.
     pub proxy_from_browser: bool,
     pub proxy_mode: u8,
@@ -794,6 +798,7 @@ impl Default for Settings {
             user_agent: String::new(),
             conn_exceptions: Vec::new(),
             resume_rewind_kb: 0,
+            later_by_default: false,
             proxy_from_browser: true,
             proxy_mode: 0,
             proxy_script: String::new(),

@@ -1421,6 +1421,10 @@ pub struct FileInfo {
     /// The names of the proxies Options had saved when the dialog opened (the Proxy list's
     /// tail): looked at once, not kept up while it is open.
     saved: Vec<String>,
+    /// Options → Connection → Download Later by default: the Start button is not the
+    /// default one (Enter gives Download Later), so the download waits until the user
+    /// presses Start.
+    pub later_default: bool,
     /// Whether Save As names a folder, looked at off the window's thread: it is asked every
     /// frame, and a folder on a network share that doesn't answer would freeze the window.
     dest_dir: crate::launch::Asked<PathBuf, bool>,
@@ -1529,6 +1533,7 @@ impl FileInfo {
             direct,
             proxy: Default::default(),
             saved,
+            later_default: false,
             replace: None,
             picked_replaces: Default::default(),
             nth: Nth::FIRST,
@@ -2025,11 +2030,13 @@ impl FileInfo {
                 );
 
                 // Its proxy (its own choice, kept with the download): what Options says, the
-                // system's, none, or one saved in Options → Proxy / Socks.
+                // system's, none, or one saved in Options → Proxy / Socks. The label sits on
+                // the box's middle, as the URL's and Save As's do (13 px below its top); the
+                // box runs to the URL's right edge, so the row lines up with them.
                 winui::text_right(
                     &p,
                     o.x + 88.0,
-                    o.y + 184.0 + dy,
+                    o.y + 193.0 + dy,
                     crate::i18n::t("Proxy"),
                     winui::TEXT(),
                 );
@@ -2043,7 +2050,7 @@ impl FileInfo {
                 let was = self.proxy.index(items.len() - 3);
                 if let Some(i) = winui::combo_light(
                     ui,
-                    r(o, 96.0, 180.0 + dy, 200.0, 21.0),
+                    r(o, 96.0, 180.0 + dy, 366.0, 23.0),
                     &shown,
                     was,
                     true,
@@ -2179,7 +2186,7 @@ impl FileInfo {
                     r(o, later_at.0, 206.0 + dy, later_at.1, 21.0),
                     "Download Later",
                     later_kind,
-                    false,
+                    self.later_default,
                     Some(9),
                 );
                 let later = winui::why_disabled(later, blocked.is_some(), blocked.unwrap_or(""));
@@ -2188,7 +2195,7 @@ impl FileInfo {
                     r(o, start_at.0, 206.0 + dy, start_at.1, 21.0),
                     "Start Download",
                     start_kind,
-                    true,
+                    !self.later_default,
                     Some(0),
                 );
                 let start = winui::why_disabled(start, blocked.is_some(), blocked.unwrap_or(""));
@@ -2278,9 +2285,9 @@ impl FileInfo {
                     Outcome::Closed
                 } else if blocked.is_some() {
                     Outcome::Open
-                } else if start.clicked() || key(egui::Key::Enter) {
+                } else if start.clicked() || (key(egui::Key::Enter) && !self.later_default) {
                     Outcome::Done(Start::Now)
-                } else if later.clicked() {
+                } else if later.clicked() || (key(egui::Key::Enter) && self.later_default) {
                     Outcome::Done(Start::Later)
                 } else {
                     Outcome::Open

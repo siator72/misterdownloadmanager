@@ -1,0 +1,86 @@
+# The UI layout audit (the user's ask): the release build's windows shot at several window
+# sizes and interface scales (MDM_ZOOM), on GitHub's Windows runner with OpenGL software
+# (docs-shots.yml's pattern), the PNGs, the app's log and the tests' report uploaded as
+# artifacts. Runs its own instance (its own data folder, MDM_DATA_DIR; MDM_OFFSCREEN=1 so
+# nothing shows on the screen) and the options' tabs are checked by `egui_kittest` tests in
+# the app's own test run (options.rs's tests), not by clicking anything here.
+name: UI audit
+on:
+  # Pushes to this branch and manual runs; never the release: it stays out of it.
+  push:
+    branches: [ui-audit]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The window sizes (the screen the app opens on) and the interface scales: the
+        # 430x566 dialog at 1x and 2x, and a small and a tall screen.
+        include:
+          - screen: 800x600
+            zoom: 1
+          - screen: 1280x800
+            zoom: 1
+          - screen: 1280x800
+            zoom: 2
+          - screen: 1920x1080
+            zoom: 1
+    runs-on: windows-latest
+    timeout-minutes: 60
+    name: audit-${{ matrix.screen }}-zoom${{ matrix.zoom }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Rust
+        shell: pwsh
+        run: |
+          if (Get-Command rustup -ErrorAction SilentlyContinue) { exit 0 }
+          Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+          ./rustup-init.exe -y --default-toolchain stable
+          "Add-Content $env:GITHUB_PATH '$env:USERPROFILE\.cargo\bin'" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build (release)
+        shell: pwsh
+        run: cargo build --release -p mdm-app -p mdm-labserver
+
+      # The tabs' own checks: their click and their colour (a chosen tab's face is the
+      # selection's, the tab below it keeps its own), beside the rest of the suite.
+      - name: Tests (with the tabs' kittest checks)
+        shell: pwsh
+        run: cargo test -p mdm-app --bins 2>&1 | Tee-Object -FilePath test-report.txt
+
+      - name: Windows of the app, at this size and scale
+        shell: pwsh
+        run: |
+          $env:MDM_DATA_DIR = "$env:RUNNER_TEMP\mdm-data"
+          $env:MDM_OFFSCREEN = "1"
+          $env:MDM_ZOOM = "${{ matrix.zoom }}"
+          New-Item -ItemType Directory -Force $env:MDM_DATA_DIR | Out-Null
+          $out = "shots-${{ matrix.screen }}-zoom${{ matrix.zoom }}"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          # The options at its several tabs (the app's own /show arguments), each shot with
+          # docs-shots.ps1's helper, which captures the window off the screens.
+          ./tools/lab/docs-shots.ps1 -Exe target\release\misterdownloadmanager.exe `
+            -Server target\release\labserver.exe -OutDir $out -Zoom ${{ matrix.zoom }} `
+            -At "40,40" -Show "options-general=options:general", "options-connection=options:connection", "options-proxy=options:proxy", "options-backup=options:backup" `
+            2>&1 | Tee-Object -FilePath app-log.txt
+          if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Artifacts (the PNGs, the app's log, the tests' report)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-audit-${{ matrix.screen }}-zoom${{ matrix.zoom }}
+          path: |
+            shots-*/
+            app-log.txt
+            test-report.txt
+          if-no-files-found: warn

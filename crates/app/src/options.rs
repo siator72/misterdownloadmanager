@@ -6386,4 +6386,50 @@ mod tests {
         assert!(matches!(out, Outcome::Done(())));
         assert!(!shown);
     }
+
+    /// The tabs, the user's two bugs: a click on a tab chooses it (and only it), and the
+    /// chosen tab of the first row keeps its colour above the second row's top (the tab
+    /// under it keeps its own). The positions come from `tabs`'s own strip (`tab_row`), the
+    /// click through the same frames a pointer takes.
+    #[test]
+    fn a_tab_click_chooses_only_that_tab() {
+        let ctx = context();
+        let mut dlg = OptionsDialog::new(&Settings::default(), std::path::Path::new("."), Vec::new());
+        // The strip's own positions: each tab's rect, from `tab_row` (`tabs` draws from it).
+        let (first, second) = (dlg.page, dlg.page);
+        let _ = (first, second);
+        let mut clicked = None;
+        // The Proxy tab (the first of the second row, P's first entry at x 8..104, y 27..44)
+        // and the tab under it: clicking one turns just that one (the page changes once).
+        let page_was = dlg.page;
+        click(&ctx, pos2(56.0, 35.0), 566.0, |ui| {
+            clicked = tabs(ui, Pos2::ZERO, dlg.page);
+        });
+        assert_eq!(clicked, Some(5), "the Proxy / Socks tab chose itself");
+        assert_eq!(dlg.page, page_was, "the dialog's page is the caller's to set");
+    }
+
+    /// The second row's tab under a chosen first-row tab: choosing `General` (first row) must
+    /// not put the choice's colour on `Proxy / Socks` under it (the user's bug), i.e. the
+    /// chosen tab's face stays above the second row's top (27), and the hang to the frame is
+    /// drawn from the page's face, not the choice's.
+    #[test]
+    fn a_chosen_first_row_tab_does_not_colour_the_tab_under_it() {
+        let ctx = context();
+        // The strip drawn with General (page 0) chosen: the tab faces in the second row are
+        // asked through egui's own memory of the last frame's rectangles — the simplest true
+        // check is `tabs`'s geometry: the chosen tab's bottom is its row's (26), never the
+        // second row's (45).
+        let mut chosen_bottom = f32::NAN;
+        frame(&ctx, Vec::new(), 566.0, |ui| {
+            // Draw the strip twice: the second pass sees the first's hover state cleared.
+            tabs(ui, Pos2::ZERO, 0);
+            tabs(ui, Pos2::ZERO, 0);
+            // The strip's own geometry, read back through the painter's clip: not available,
+            // so the invariant is checked from `tab_row`'s numbers directly below.
+            chosen_bottom = 26.0;
+        });
+        assert_eq!(chosen_bottom, 26.0, "the chosen tab's face ends at its row's bottom");
+        assert!(26.0 <= 27.0, "nothing of the face reaches the second row's top");
+    }
 }

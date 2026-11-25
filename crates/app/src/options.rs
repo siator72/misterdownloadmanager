@@ -473,9 +473,10 @@ impl OptionsDialog {
                     8 => self.sounds(ui, o),
                     _ => self.regional(ui, o),
                 }
+                let extra = self.proxy_extra_height();
                 let ok = winui::button_light(
                     ui,
-                    r(o, 269.0, 537.0, 73.0, 21.0),
+                    r(o, 269.0, 537.0 + extra, 73.0, 21.0),
                     "OK",
                     ButtonKind::Default,
                     false,
@@ -483,7 +484,7 @@ impl OptionsDialog {
                 .clicked();
                 if winui::button_light(
                     ui,
-                    r(o, 350.0, 537.0, 73.0, 21.0),
+                    r(o, 350.0, 537.0 + extra, 73.0, 21.0),
                     // i18n: noun: button that opens the help
                     "Help",
                     ButtonKind::Normal,
@@ -2112,11 +2113,10 @@ impl OptionsDialog {
         self.saved_proxies_row(ui, o);
     }
 
-    /// The Proxy page's height beyond the default 566: the saved proxies' list grows with
-    /// its entries (the same growth `saved_proxies_row`'s list takes), so the window's
-    /// frame always holds the page's own content.
+    /// The Proxy page's height beyond the default 566: the saved proxies' list grows a row
+    /// per entry (the same growth its list takes), and OK and Help go down with it.
     fn proxy_extra_height(&self) -> f32 {
-        22.0 * self.s.saved_proxies.len().min(4) as f32
+        22.0 * self.s.saved_proxies.len().min(4) as f32 + 21.0
     }
 
     /// Proxy / Socks → Saved proxies: the list of proxies saved by name (of every kind), the
@@ -2144,7 +2144,7 @@ impl OptionsDialog {
         } else {
             names
         };
-        let list_height = 66.0 + 22.0 * self.s.saved_proxies.len().min(4) as f32;
+        let list_height = 44.0 + 22.0 * self.s.saved_proxies.len().min(4) as f32;
         self.saved_rows.name = crate::i18n::t("Saved proxies:");
         let (_open, delete) = report(
             ui,

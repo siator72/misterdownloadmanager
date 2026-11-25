@@ -5696,8 +5696,11 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
         // The chosen tab keeps its place and size (nothing moves under the pointer); it stands
         // out by its colour alone (the user's ask: no growing).
         let (x0, x1) = (x0, x1);
-        // A chosen tab hangs on the page frame; an unchosen one ends at its row's bottom.
-        let bottom = if sel { 45.0 } else { top + 17.0 };
+        // A chosen tab hangs on the page frame; an unchosen one ends at its row's bottom. The
+        // hang keeps the tab's face only above the next row's top (the tab under it keeps its
+        // own colour: the user's bug — the tab below turned blue with it) and the rest hangs
+        // in the page's face between the borders, joined to the frame.
+        let bottom = top + 17.0;
         // From the leading edge: the first tab at the right in RTL.
         let rc = winui::rect(Rect::from_min_max(
             o + vec2(x0, top),
@@ -5840,11 +5843,23 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
         shadow,
     );
     fill(&p, o.x + 6.0, o.y + 469.0, o.x + 423.0, o.y + 469.0, shadow);
-    // The chosen tab over the page frame, in its own row's place (it only reaches down onto
-    // the frame's top edge).
+    // The chosen tab over the page frame, in its own row's place: its face stays above the
+    // next row's top (drawn in the loop above), and here only its hang — the page's face
+    // between its borders — reaches down onto the frame's top edge.
     for (row_at, row) in rows.iter().enumerate() {
-        if let Some(t) = row.iter().find(|t| t.0 == page) {
-            tab(ui, *t, row_at, true);
+        if let Some((i, label, x0, x1, _lx)) = row.iter().find(|t| t.0 == page) {
+            let top = if row_at == 0 { 27.0 } else { 26.0 };
+            fill(
+                &p,
+                o.x + x0 + 1.0,
+                o.y + top,
+                o.x + x1,
+                o.y + 45.0,
+                LIGHT_PAGE(),
+            );
+            fill(&p, o.x + x0, o.y + top, o.x + x0, o.y + 45.0, border);
+            fill(&p, o.x + x1, o.y + top, o.x + x1, o.y + 45.0, border);
+            let _ = (i, label);
         }
     }
     clicked

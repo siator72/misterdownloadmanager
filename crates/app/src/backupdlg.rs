@@ -47,6 +47,7 @@ impl Dialog {
         }
         let mut open = true;
         let mut reload = false;
+        let mut ok = false;
         let title = if self.restore {
             "Restore backup"
         } else {
@@ -101,12 +102,17 @@ impl Dialog {
                     }
                     Step::Done(Err(e)) => (1.0, format!("Failed: {e}")),
                 };
-                ui.set_min_width(300.0);
+                ui.set_min_width(320.0);
+                ui.set_max_width(340.0);
                 ui.add_space(6.0);
-                ui.label(line);
+                // The line wraps at the window's width (a long path's skipped line reads whole,
+                // not tangled over the bar).
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    ui.label(egui::RichText::new(line).size(13.0));
+                });
                 ui.add_space(6.0);
                 let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(300.0, 14.0), egui::Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(320.0, 14.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.0, Color32::from_gray(230));
                 ui.painter().rect_filled(
                     Rect::from_min_size(
@@ -124,12 +130,14 @@ impl Dialog {
                         .add(egui::Button::new("OK").min_size(Vec2::new(75.0, 23.0)))
                         .clicked()
                 {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    // This window only: `Close` would take the app's own window down.
+                    ok = true;
                 }
             });
         if changed {
             ctx.request_repaint();
         }
+        open &= !ok;
         (open, reload)
     }
 }

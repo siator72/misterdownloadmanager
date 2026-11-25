@@ -1842,10 +1842,12 @@ impl OptionsDialog {
             .parse::<u32>()
             .unwrap_or(self.s.resume_rewind_kb);
         // Download Later by default: a download from the Download File Info window waits
-        // for the user's Start (Enter gives Download Later, not Start Download).
+        // for the user's Start (Enter gives Download Later, not Start Download). It sits
+        // under the resume line, inside the page's frame (the user's bug report: it hung
+        // off the right edge, out of the box).
         winui::checkbox_light(
             ui,
-            o + vec2(154.0, 470.0),
+            o + vec2(27.0, 484.0),
             &mut self.s.later_by_default,
             // i18n: Options → Connection: a check box; the download waits for the user's Start
             "Wait for Start before downloading (Download Later by default)",
@@ -2110,10 +2112,11 @@ impl OptionsDialog {
         self.saved_proxies_row(ui, o);
     }
 
-    /// The Proxy page's height beyond the default 566: the saved proxies' list takes a row
-    /// of its own for every two entries, so the window grows with it.
+    /// The Proxy page's height beyond the default 566: the saved proxies' list grows with
+    /// its entries (the same growth `saved_proxies_row`'s list takes), so the window's
+    /// frame always holds the page's own content.
     fn proxy_extra_height(&self) -> f32 {
-        self.s.saved_proxies.len().saturating_sub(2) as f32 * 22.0
+        22.0 * self.s.saved_proxies.len().min(4) as f32
     }
 
     /// Proxy / Socks → Saved proxies: the list of proxies saved by name (of every kind), the
@@ -2141,7 +2144,7 @@ impl OptionsDialog {
         } else {
             names
         };
-        let list_height = 88.0 + 22.0 * self.s.saved_proxies.len().min(4) as f32;
+        let list_height = 66.0 + 22.0 * self.s.saved_proxies.len().min(4) as f32;
         self.saved_rows.name = crate::i18n::t("Saved proxies:");
         let (_open, delete) = report(
             ui,
@@ -5690,11 +5693,9 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
                    row_at: usize,
                    sel: bool| {
         let top = if row_at == 0 { 9.0 } else { 27.0 };
-        let (x0, x1) = if sel {
-            (x0 - if x0 <= 8.0 { 2.0 } else { 1.0 }, x1 + 2.0)
-        } else {
-            (x0, x1)
-        };
+        // The chosen tab keeps its place and size (nothing moves under the pointer); it stands
+        // out by its colour alone (the user's ask: no growing).
+        let (x0, x1) = (x0, x1);
         // A chosen tab hangs on the page frame; an unchosen one ends at its row's bottom.
         let bottom = if sel { 45.0 } else { top + 17.0 };
         // From the leading edge: the first tab at the right in RTL.
@@ -5747,61 +5748,57 @@ fn tabs(ui: &mut Ui, o: Pos2, page: usize) -> Option<usize> {
             }
         }
         let face = if sel {
-            LIGHT_PAGE()
+            winui::SELECTION()
         } else if resp.hovered() {
             winui::TAB_HOT()
         } else {
             winui::TAB_UNSELECTED()
         };
         fill(&p, o.x + x0, o.y + top, o.x + x1, o.y + bottom, face);
-        fill(
-            &p,
-            o.x + x0 + 1.0,
-            o.y + top,
-            o.x + x1 - 1.0,
-            o.y + top,
-            border,
-        );
-        fill(
-            &p,
-            o.x + x0,
-            o.y + top + 1.0,
-            o.x + x0,
-            o.y + bottom,
-            border,
-        );
-        fill(
-            &p,
-            o.x + x1,
-            o.y + top + 1.0,
-            o.x + x1,
-            o.y + bottom,
-            border,
-        ); // A translated row too wide for the strip has narrower tabs (`tab_row`): their labels are
-        // cut with "..." and shown whole on hover. The chosen tab's words stand bold, the
-        // clearest cue this theme has (the theme's own bold face, no new colour).
+        if !sel {
+            fill(
+                &p,
+                o.x + x0 + 1.0,
+                o.y + top,
+                o.x + x1 - 1.0,
+                o.y + top,
+                border,
+            );
+            fill(
+                &p,
+                o.x + x0,
+                o.y + top + 1.0,
+                o.x + x0,
+                o.y + bottom,
+                border,
+            );
+            fill(
+                &p,
+                o.x + x1,
+                o.y + top + 1.0,
+                o.x + x1,
+                o.y + bottom,
+                border,
+            );
+        } // A translated row too wide for the strip has narrower tabs (`tab_row`): their labels are
+        // cut with "..." and shown whole on hover. The chosen tab's colour is the cue (its face
+        // the theme's accent, its text on it light); the words stay one size, never growing.
         let full = crate::i18n::t(label);
         let shown = winui::ellipsize(&p, &winui::tahoma(), full, x1 - x0 - 6.0);
         let base = if row_at == 0 { 22.0 } else { 40.0 };
+        let on = if sel {
+            winui::SELECTION_TEXT()
+        } else {
+            LIGHT_TEXT()
+        };
         if shown == full {
             let w = winui::text_width(&p, full);
             let lx = x0 + ((x1 - x0 - w) / 2.0).floor();
-            if sel {
-                winui::text_font(
-                    &p,
-                    winui::tahoma_bold(),
-                    o.x + lx,
-                    o.y + base,
-                    full,
-                    LIGHT_TEXT(),
-                );
-            } else {
-                text(&p, o.x + lx, o.y + base, full, LIGHT_TEXT());
-            }
+            text(&p, o.x + lx, o.y + base, full, on);
         } else {
             let w = winui::text_width(&p, &shown);
             let lx = x0 + ((x1 - x0 - w) / 2.0).floor();
-            let rc = text(&p, o.x + lx, o.y + base, &shown, LIGHT_TEXT());
+            let rc = text(&p, o.x + lx, o.y + base, &shown, on);
             winui::full_on_hover(ui, rc, ("opt-tab-label", i), full);
         }
         winui::show_focus(ui, &resp, rc.shrink(2.0));
